@@ -82,3 +82,29 @@ export interface Pixels {
   width: number;
   height: number;
 }
+
+// ---------- 动画片段（Clip） ----------
+
+/** 片段循环模式：循环 / 单次（停在末帧）/ 往返（端点不重复） */
+export type ClipLoopMode = "loop" | "once" | "pingpong";
+
+export const CLIP_LOOP_MODES: ClipLoopMode[] = ["loop", "once", "pingpong"];
+
+/** 片段对已有帧的一次引用：独立时长与可选事件标记 */
+export interface ClipFrameRef {
+  /** 引用的 FrameItem.id */
+  frameId: string;
+  /** 该片段内此帧的独立时长（毫秒），与帧自身时长及其它片段互不影响 */
+  duration: number;
+  /** 非空表示该帧带事件标记，播放进入此帧时触发（往返端点每轮只触发一次） */
+  event?: string;
+}
+
+/** 命名动画片段：引用已有帧，拥有独立顺序、时长、循环模式与事件 */
+export interface Clip {
+  id: string;
+  name: string;
+  loop: ClipLoopMode;
+  /** 片段内的播放顺序（可与帧列表顺序不同，同一帧可被多个片段复用） */
+  frames: ClipFrameRef[];
+}

@@ -68,7 +68,7 @@
   <span class="sep"></span>
 
   <button on:click={() => void saveNow()} title="保存到 IndexedDB">保存项目</button>
-  <button class="danger" on:click={() => void clearStorage()}>清空</button>
+  <button id="clear-storage-btn" class="danger" on:click={() => void clearStorage()}>清空</button>
 
   <span class="count mono">{$frameCount} 帧</span>
 </div>

@@ -1,9 +1,9 @@
 import { openDB, type IDBPDatabase } from "idb";
-import type { FrameItem, PackResult, Settings } from "./types";
+import type { Clip, FrameItem, PackResult, Settings } from "./types";
 import type { AtlasJSON } from "./serialize";
 
 /**
- * IndexedDB 持久化：帧 PNG（Blob）、时长、设置与最近一次打包结果
+ * IndexedDB 持久化：帧 PNG（Blob）、时长、设置、动画片段与最近一次打包结果
  * 全部保存在浏览器本地，不上传任何数据。
  */
 
@@ -16,8 +16,12 @@ export interface StoredPack {
   atlasBlob: Blob;
 }
 
+/** 持久化用的片段结构（可结构化克隆，不含 Blob） */
+export type StoredClip = Clip;
+
 export interface StoredProject {
-  version: 1;
+  /** 1=旧格式（无 clips，恢复时自动生成默认片段）；2=含 clips */
+  version: number;
   savedAt: number;
   settings: Settings;
   frames: Array<{
@@ -28,6 +32,7 @@ export interface StoredProject {
     height: number;
     blob: Blob;
   }>;
+  clips: StoredClip[];
   pack: StoredPack | null;
 }
 
@@ -60,10 +65,11 @@ export function toStored(
   frames: FrameItem[],
   settings: Settings,
   pack: PackResult | null,
-  json: AtlasJSON | null
+  json: AtlasJSON | null,
+  clips: Clip[]
 ): StoredProject {
   return {
-    version: 1,
+    version: 2,
     savedAt: Date.now(),
     settings: { ...settings },
     frames: frames.map((f) => ({
@@ -74,6 +80,8 @@ export function toStored(
       height: f.height,
       blob: f.blob
     })),
+    // 片段只含字符串/数字/数组，结构化克隆可直接存储
+    clips: clips.map((c) => ({ ...c, frames: c.frames.map((r) => ({ ...r })) })),
     pack: pack && json ? { json, atlasBlob: pack.atlasBlob } : null
   };
 }

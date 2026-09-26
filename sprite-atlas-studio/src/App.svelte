@@ -3,9 +3,11 @@
   import Toolbar from "./lib/components/Toolbar.svelte";
   import SettingsPanel from "./lib/components/SettingsPanel.svelte";
   import FrameList from "./lib/components/FrameList.svelte";
+  import ClipsPanel from "./lib/components/ClipsPanel.svelte";
   import Preview from "./lib/components/Preview.svelte";
   import AtlasView from "./lib/components/AtlasView.svelte";
-  import { addFiles, restoreFromDB, startAutoSave, status, notify } from "./lib/core/store";
+  import DeleteFrameDialog from "./lib/components/DeleteFrameDialog.svelte";
+  import { addFiles, clips, restoreFromDB, selectedClipId, startAutoSave, status, notify } from "./lib/core/store";
 
   let ready = false;
   let dragOver = false;
@@ -22,6 +24,13 @@
     dragOver = false;
     const files = e.dataTransfer?.files;
     if (files && files.length > 0) void addFiles(files);
+  }
+
+  // 片段列表变化后，若选中项失效则回到第一个片段
+  $: if ($clips.length > 0 && !$clips.some((c) => c.id === $selectedClipId)) {
+    selectedClipId.set($clips[0]!.id);
+  } else if ($clips.length === 0 && $selectedClipId !== null) {
+    selectedClipId.set(null);
   }
 </script>
 
@@ -47,6 +56,7 @@
     <section class="left">
       <SettingsPanel />
       <FrameList />
+      <ClipsPanel />
     </section>
     <section class="center">
       <Preview />
@@ -55,6 +65,8 @@
       <AtlasView />
     </section>
   </main>
+
+  <DeleteFrameDialog />
 {/if}
 
 <style>

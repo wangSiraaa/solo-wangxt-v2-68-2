@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { buildAtlasJSON, parseAtlasJSON, JSON_APP_ID } from "../../src/lib/core/serialize";
+import { buildAtlasJSON, parseAtlasJSON, JSON_APP_ID, JSON_VERSION } from "../../src/lib/core/serialize";
 import { packFrames, type PackInput } from "../../src/lib/core/pack";
-import { DEFAULT_SETTINGS } from "../../src/lib/core/types";
+import { DEFAULT_SETTINGS, type Clip } from "../../src/lib/core/types";
 
 function makeLayout() {
   const inputs: PackInput[] = [
@@ -83,5 +83,118 @@ describe("buildAtlasJSON / parseAtlasJSON", () => {
     });
     expect(json.meta.app).toBe(JSON_APP_ID);
     expect(json.meta.totalDuration).toBe(50 + 80 + 120);
+  });
+});
+
+describe("片段（clips）序列化", () => {
+  function makeClips(): Clip[] {
+    // id 与 makeLayout 中的 PackInput id 对应："1","2","3"
+    return [
+      {
+        id: "c1",
+        name: "跑步",
+        loop: "loop",
+        frames: [
+          { frameId: "1", duration: 50, event: "step" },
+          { frameId: "2", duration: 80 },
+          { frameId: "3", duration: 120, event: "attack" }
+        ]
+      },
+      {
+        id: "c2",
+        name: "往返片段",
+        loop: "pingpong",
+        frames: [
+          { frameId: "3", duration: 200 },
+          { frameId: "1", duration: 70 }
+        ]
+      }
+    ];
+  }
+
+  it("片段顺序、循环模式、独立时长与事件完整往返", () => {
+    const layout = makeLayout();
+    const json = buildAtlasJSON(layout, {
+      imageName: "atlas.png",
+      trimmed: true,
+      settings: DEFAULT_SETTINGS,
+      clips: makeClips()
+    });
+    expect(json.meta.version).toBe(JSON_VERSION);
+    expect(json.meta.clips).toHaveLength(2);
+    expect(json.meta.clips!.map((c) => c.name)).toEqual(["跑步", "往返片段"]);
+    expect(json.meta.clips![0]!.loop).toBe("loop");
+    expect(json.meta.clips![1]!.loop).toBe("pingpong");
+    expect(json.meta.clips![0]!.frames).toEqual([
+      { frame: "run_01.png", duration: 50, event: "step" },
+      { frame: "run_02.png", duration: 80 },
+      { frame: "run_03.png", duration: 120, event: "attack" }
+    ]);
+    expect(json.meta.clips![1]!.frames).toEqual([
+      { frame: "run_03.png", duration: 200 },
+      { frame: "run_01.png", duration: 70 }
+    ]);
+
+    const parsed = parseAtlasJSON(JSON.parse(JSON.stringify(json)));
+    expect(parsed.clips).not.toBeNull();
+    expect(parsed.clips!.map((c) => [c.name, c.loop])).toEqual([
+      ["跑步", "loop"],
+      ["往返片段", "pingpong"]
+    ]);
+    expect(parsed.clips![0]!.frames[0]).toEqual({ frame: "run_01.png", duration: 50, event: "step" });
+  });
+
+  it("无片段导出时 meta.clips 缺省（旧格式），解析得到 null 以便自动建默认片段", () => {
+    const layout = makeLayout();
+    const json = buildAtlasJSON(layout, {
+      imageName: "atlas.png",
+      trimmed: true,
+      settings: DEFAULT_SETTINGS
+    });
+    expect(json.meta.clips).toBeUndefined();
+    const parsed = parseAtlasJSON(json);
+    expect(parsed.clips).toBeNull();
+  });
+
+  it("兼容 1.0.0 旧 JSON（无 clips 字段）", () => {
+    const layout = makeLayout();
+    const json = buildAtlasJSON(layout, {
+      imageName: "atlas.png",
+      trimmed: true,
+      settings: DEFAULT_SETTINGS
+    });
+    json.meta.version = "1.0.0";
+    const parsed = parseAtlasJSON(JSON.parse(JSON.stringify(json)));
+    expect(parsed.clips).toBeNull();
+    expect(parsed.frames).toHaveLength(3);
+  });
+
+  it("非法循环模式回退为 loop；非法时长回退 100", () => {
+    const layout = makeLayout();
+    const json = buildAtlasJSON(layout, {
+      imageName: "atlas.png",
+      trimmed: true,
+      settings: DEFAULT_SETTINGS,
+      clips: makeClips()
+    });
+    const tampered = JSON.parse(JSON.stringify(json));
+    tampered.meta.clips[0].loop = "weird";
+    tampered.meta.clips[0].frames[0].duration = 0;
+    const parsed = parseAtlasJSON(tampered);
+    expect(parsed.clips![0]!.loop).toBe("loop");
+    expect(parsed.clips![0]!.frames[0]!.duration).toBe(100);
+  });
+
+  it("拒绝引用不存在帧的片段", () => {
+    const layout = makeLayout();
+    const json = buildAtlasJSON(layout, {
+      imageName: "atlas.png",
+      trimmed: true,
+      settings: DEFAULT_SETTINGS,
+      clips: makeClips()
+    });
+    const tampered = JSON.parse(JSON.stringify(json));
+    tampered.meta.clips[1].frames[0].frame = "ghost.png";
+    expect(() => parseAtlasJSON(tampered)).toThrow(/不存在的帧/);
   });
 });

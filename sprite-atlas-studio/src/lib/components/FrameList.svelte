@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { frames, moveFrame, removeFrame, selectedId, setDuration } from "../core/store";
+  import { frames, moveFrame, requestRemoveFrame, selectedId, setDuration } from "../core/store";
 
   let dragIndex: number | null = null;
 
@@ -59,7 +59,7 @@
           <span class="ops">
             <button title="上移" on:click|stopPropagation={() => moveFrame(f.id, -1)}>↑</button>
             <button title="下移" on:click|stopPropagation={() => moveFrame(f.id, 1)}>↓</button>
-            <button title="删除" class="danger" on:click|stopPropagation={() => removeFrame(f.id)}>✕</button>
+            <button title="删除" class="danger" on:click|stopPropagation={() => requestRemoveFrame(f.id)}>✕</button>
           </span>
         </div>
       {/each}

@@ -44,6 +44,11 @@ test("完整流程：导入 → 设置时长 → 打包 → 预览 → 导出 �
   await firstDur.fill("250");
   await firstDur.dispatchEvent("change");
 
+  // 片段时长独立于全局帧时长：把默认片段首帧改为 250ms、其余保持 100ms
+  const clipDur = page.locator(`[data-ref-duration-for='默认片段']`);
+  await clipDur.nth(0).fill("250");
+  await clipDur.nth(0).dispatchEvent("change");
+
   // 3) 打包
   await page.locator("#pack-btn").click();
   await expect(page.locator("#atlas-image")).toBeVisible();
@@ -90,6 +95,12 @@ test("完整流程：导入 → 设置时长 → 打包 → 预览 → 导出 �
   expect(json.frames["walk_02.png"].duration).toBe(100);
   expect(typeof json.meta.atlasDataURL).toBe("string");
   expect(json.meta.atlasDataURL.startsWith("data:image/png;base64,")).toBe(true);
+  // 片段随 JSON 导出：默认片段引用全部 8 帧，首帧片段内时长 250ms
+  expect(json.meta.clips).toHaveLength(1);
+  expect(json.meta.clips[0].name).toBe("默认片段");
+  expect(json.meta.clips[0].loop).toBe("loop");
+  expect(json.meta.clips[0].frames.map((f: { frame: string }) => f.frame)).toEqual(FRAME_NAMES);
+  expect(json.meta.clips[0].frames[0].duration).toBe(250);
   // JSON 中的矩形与页面表格一致
   for (const [name, rect] of Object.entries(tableBefore)) {
     const f = json.frames[name];
@@ -98,7 +109,7 @@ test("完整流程：导入 → 设置时长 → 打包 → 预览 → 导出 �
   }
 
   // 6) 清空（同时清掉 IndexedDB）
-  await page.getByRole("button", { name: "清空" }).click();
+  await page.locator("#clear-storage-btn").click();
   await expect(page.locator("#frame-list .frame-item")).toHaveCount(0);
 
   // 7) 导入 JSON 恢复（图集内嵌，无需另选 PNG）
