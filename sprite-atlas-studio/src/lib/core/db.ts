@@ -1,9 +1,9 @@
 import { openDB, type IDBPDatabase } from "idb";
-import type { FrameItem, PackResult, Settings } from "./types";
+import type { AnimClip, FrameItem, PackResult, Settings } from "./types";
 import type { AtlasJSON } from "./serialize";
 
 /**
- * IndexedDB 持久化：帧 PNG（Blob）、时长、设置与最近一次打包结果
+ * IndexedDB 持久化：帧 PNG（Blob）、时长、动画片段、设置与最近一次打包结果
  * 全部保存在浏览器本地，不上传任何数据。
  */
 
@@ -28,6 +28,10 @@ export interface StoredProject {
     height: number;
     blob: Blob;
   }>;
+  /** 动画片段（旧版本存档可能没有此字段） */
+  clips?: AnimClip[];
+  /** 预览中选中的片段 id（null = 原始序列） */
+  activeClipId?: string | null;
   pack: StoredPack | null;
 }
 
@@ -60,7 +64,9 @@ export function toStored(
   frames: FrameItem[],
   settings: Settings,
   pack: PackResult | null,
-  json: AtlasJSON | null
+  json: AtlasJSON | null,
+  clips: AnimClip[] = [],
+  activeClipId: string | null = null
 ): StoredProject {
   return {
     version: 1,
@@ -74,6 +80,11 @@ export function toStored(
       height: f.height,
       blob: f.blob
     })),
+    clips: clips.map((c) => ({
+      ...c,
+      entries: c.entries.map((e) => ({ ...e }))
+    })),
+    activeClipId,
     pack: pack && json ? { json, atlasBlob: pack.atlasBlob } : null
   };
 }

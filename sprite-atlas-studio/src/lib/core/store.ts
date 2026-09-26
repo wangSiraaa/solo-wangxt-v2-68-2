@@ -1,9 +1,17 @@
 import { derived, get, writable } from "svelte/store";
-import type { FrameItem, PackResult, PackedFrame, Settings, TrimRect } from "./types";
+import type { AnimClip, FrameItem, LoopMode, PackResult, PackedFrame, Settings, TrimRect } from "./types";
 import { DEFAULT_SETTINGS } from "./types";
 import { computeAlphaBBox } from "./trim";
 import { packFrames, type PackInput, type PackLayout } from "./pack";
-import { buildAtlasJSON, parseAtlasJSON, type AtlasJSON } from "./serialize";
+import { buildAtlasJSON, clipsToJSON, parseAtlasJSON, type AtlasJSON } from "./serialize";
+import {
+  clampDuration,
+  countFrameRefs,
+  makeClip,
+  removeFrameRefs,
+  uniqueClipName,
+  withEvent
+} from "./clips";
 import {
   blobToImage,
   canvasToBlob,
@@ -23,6 +31,11 @@ export const packResult = writable<PackResult | null>(null);
 export const selectedId = writable<string | null>(null);
 export const busy = writable(false);
 export const status = writable<{ kind: "info" | "error"; text: string } | null>(null);
+
+/** 动画片段列表（顺序即展示/导出顺序） */
+export const clips = writable<AnimClip[]>([]);
+/** 预览当前播放的片段 id；null = 原始序列（全部帧） */
+export const activeClipId = writable<string | null>(null);
 
 export const frameCount = derived(frames, ($f) => $f.length);
 
@@ -99,6 +112,53 @@ export function removeFrame(id: string): void {
   packResult.set(null);
 }
 
+// ---------- 帧删除（片段引用检查） ----------
+
+/** 待确认的帧删除：帧被片段引用时先展示影响，由用户决定取消或一并移除引用 */
+export interface PendingFrameDelete {
+  frameId: string;
+  frameName: string;
+  affected: Array<{ clipId: string; clipName: string; refs: number }>;
+}
+
+export const pendingFrameDelete = writable<PendingFrameDelete | null>(null);
+
+/**
+ * 请求删除帧：若被任何片段引用，则挂起并展示受影响片段；
+ * 否则直接删除。确认见 confirmRemoveFrame，取消见 cancelRemoveFrame。
+ */
+export function requestRemoveFrame(id: string): void {
+  const f = get(frames).find((x) => x.id === id);
+  if (!f) return;
+  const affected = countFrameRefs(get(clips), id);
+  if (affected.length === 0) {
+    removeFrame(id);
+    return;
+  }
+  pendingFrameDelete.set({ frameId: id, frameName: f.name, affected });
+}
+
+export function cancelRemoveFrame(): void {
+  pendingFrameDelete.set(null);
+}
+
+/**
+ * 确认删除：同一同步流程内删除帧并移除所有片段中的引用，
+ * 两个 store 一起提交（自动保存防抖在其后触发），保证落盘状态一致——
+ * 要么都发生，要么都不发生。
+ */
+export function confirmRemoveFrame(): void {
+  const pending = get(pendingFrameDelete);
+  if (!pending) return;
+  pendingFrameDelete.set(null);
+  removeFrame(pending.frameId);
+  clips.set(removeFrameRefs(get(clips), pending.frameId));
+  const total = pending.affected.reduce((n, a) => n + a.refs, 0);
+  notify(
+    `已删除 ${pending.frameName}，并从 ${pending.affected.length} 个片段中移除 ${total} 处引用`
+  );
+}
+
 export function moveFrame(id: string, dir: -1 | 1): void {
   const list = [...get(frames)];
   const i = list.findIndex((x) => x.id === id);
@@ -129,7 +189,98 @@ export function clearAll(): void {
   frames.set([]);
   packResult.set(null);
   selectedId.set(null);
+  clips.set([]);
+  activeClipId.set(null);
+  pendingFrameDelete.set(null);
   lastJSON = null;
+}
+
+// ---------- 动画片段 ----------
+
+function updateClip(id: string, fn: (c: AnimClip) => AnimClip): void {
+  clips.set(get(clips).map((c) => (c.id === id ? fn(c) : c)));
+}
+
+/** 新建片段：默认按当前顺序引用全部帧（复制当前时长），循环模式 */
+export function addClip(): void {
+  const list = get(frames);
+  if (list.length === 0) {
+    notify("请先导入 PNG 帧，再创建片段", "error");
+    return;
+  }
+  const clip = makeClip(uniqueClipName(get(clips)), list, "loop");
+  clips.set([...get(clips), clip]);
+  notify(`已创建片段「${clip.name}」（含全部 ${list.length} 帧）`);
+}
+
+export function removeClip(id: string): void {
+  const c = get(clips).find((x) => x.id === id);
+  if (!c) return;
+  clips.set(get(clips).filter((x) => x.id !== id));
+  if (get(activeClipId) === id) activeClipId.set(null);
+  notify(`已删除片段「${c.name}」`);
+}
+
+export function renameClip(id: string, name: string): void {
+  const v = name.trim();
+  if (!v) return;
+  updateClip(id, (c) => ({ ...c, name: v }));
+}
+
+export function setClipLoop(id: string, loop: LoopMode): void {
+  updateClip(id, (c) => ({ ...c, loop }));
+}
+
+/** 把一帧追加到片段末尾（复制该帧当前时长） */
+export function clipAddFrame(clipId: string, frameId: string): void {
+  const f = get(frames).find((x) => x.id === frameId);
+  if (!f) return;
+  updateClip(clipId, (c) => ({
+    ...c,
+    entries: [...c.entries, { frameId, duration: f.duration }]
+  }));
+}
+
+export function clipRemoveEntry(clipId: string, index: number): void {
+  updateClip(clipId, (c) => ({
+    ...c,
+    entries: c.entries.filter((_, i) => i !== index)
+  }));
+}
+
+export function clipMoveEntry(clipId: string, index: number, dir: -1 | 1): void {
+  updateClip(clipId, (c) => {
+    const j = index + dir;
+    if (index < 0 || j < 0 || j >= c.entries.length) return c;
+    const entries = [...c.entries];
+    const a = entries[index]!;
+    entries[index] = entries[j]!;
+    entries[j] = a;
+    return { ...c, entries };
+  });
+}
+
+/** 设置片段内某条目的时长（与帧列表时长互不影响） */
+export function clipSetEntryDuration(clipId: string, index: number, ms: number): void {
+  const v = clampDuration(ms);
+  updateClip(clipId, (c) => ({
+    ...c,
+    entries: c.entries.map((e, i) => (i === index ? { ...e, duration: v } : e))
+  }));
+}
+
+/** 设置/清除片段内某条目的事件标记（空字符串清除） */
+export function clipSetEntryEvent(clipId: string, index: number, event: string): void {
+  updateClip(clipId, (c) => ({
+    ...c,
+    entries: c.entries.map((e, i) => (i === index ? withEvent(e, event) : e))
+  }));
+}
+
+/** 切换预览播放来源：null = 原始序列（全部帧） */
+export function setActiveClip(id: string | null): void {
+  if (id !== null && !get(clips).some((c) => c.id === id)) return;
+  activeClipId.set(id);
 }
 
 // ---------- 打包 ----------
@@ -211,7 +362,8 @@ export async function pack(): Promise<void> {
     lastJSON = buildAtlasJSON(layout, {
       imageName: "atlas.png",
       trimmed: s.trim,
-      settings: s
+      settings: s,
+      clips: get(clips)
     });
     notify(`打包完成：${layout.atlasWidth}×${layout.atlasHeight}，共 ${layout.frames.length} 帧`);
   } catch (e) {
@@ -239,10 +391,15 @@ export async function exportJSON(): Promise<void> {
     return;
   }
   const s = get(settings);
-  let json = lastJSON;
+  // 片段可能在打包后又编辑过：导出时以当前片段为准
+  const nameById = new Map(p.frames.map((f) => [f.id, f.name]));
+  let json: AtlasJSON = {
+    ...lastJSON,
+    meta: { ...lastJSON.meta, clips: clipsToJSON(get(clips), nameById) }
+  };
   if (s.embedAtlas) {
     const dataURL = canvasToDataURL(await blobToCanvas(p.atlasBlob));
-    json = { ...lastJSON, meta: { ...lastJSON.meta, atlasDataURL: dataURL } };
+    json = { ...json, meta: { ...json.meta, atlasDataURL: dataURL } };
   }
   downloadBlob(new Blob([JSON.stringify(json, null, 2)], { type: "application/json" }), "atlas.json");
   notify("已导出 atlas.png 与 atlas.json");
@@ -327,6 +484,33 @@ export async function importJSON(jsonFile: File, atlasFile?: File): Promise<void
     clearAll();
     frames.set(restored);
     settings.set({ ...parsed.settings });
+
+    // 片段：新格式按 JSON 恢复（帧名 → 新帧 id）；旧格式自动创建默认片段
+    const idByName = new Map(restored.map((f) => [f.name, f.id]));
+    let restoredClips: AnimClip[];
+    if (parsed.clips) {
+      restoredClips = parsed.clips.map((pc) => ({
+        id: uid(),
+        name: pc.name,
+        loop: pc.loop,
+        entries: pc.frames.flatMap((pe) => {
+          const frameId = idByName.get(pe.frame);
+          if (!frameId) return []; // 引用未知帧名：忽略该条目
+          return [
+            {
+              frameId,
+              duration: clampDuration(pe.duration),
+              ...(pe.event ? { event: pe.event } : {})
+            }
+          ];
+        })
+      }));
+    } else {
+      restoredClips = [makeClip("默认片段", restored, "loop")];
+    }
+    clips.set(restoredClips);
+    activeClipId.set(null);
+
     packResult.set({
       atlasWidth: parsed.size.w,
       atlasHeight: parsed.size.h,
@@ -338,9 +522,13 @@ export async function importJSON(jsonFile: File, atlasFile?: File): Promise<void
     });
     lastJSON = buildAtlasJSON(
       { atlasWidth: parsed.size.w, atlasHeight: parsed.size.h, frames: packedFrames },
-      { imageName: parsed.imageName, trimmed: parsed.settings.trim, settings: parsed.settings }
+      { imageName: parsed.imageName, trimmed: parsed.settings.trim, settings: parsed.settings, clips: restoredClips }
     );
-    notify(`已从 JSON 恢复 ${restored.length} 帧与打包结果`);
+    notify(
+      parsed.clips
+        ? `已从 JSON 恢复 ${restored.length} 帧、${restoredClips.length} 个片段与打包结果`
+        : `已从 JSON 恢复 ${restored.length} 帧与打包结果（旧格式：已自动创建默认片段）`
+    );
   } catch (e) {
     notify(e instanceof Error ? e.message : String(e), "error");
   } finally {
@@ -352,7 +540,9 @@ export async function importJSON(jsonFile: File, atlasFile?: File): Promise<void
 
 export async function saveNow(): Promise<void> {
   try {
-    await saveProject(toStored(get(frames), get(settings), get(packResult), lastJSON));
+    await saveProject(
+      toStored(get(frames), get(settings), get(packResult), lastJSON, get(clips), get(activeClipId))
+    );
     notify("项目已保存到浏览器本地");
   } catch (e) {
     notify(`保存失败：${e instanceof Error ? e.message : String(e)}`, "error");
@@ -374,6 +564,20 @@ export async function restoreFromDB(): Promise<boolean> {
     }));
     frames.set(restored);
     settings.set({ ...DEFAULT_SETTINGS, ...stored.settings });
+
+    // 片段：旧存档可能没有该字段；引用已不存在的帧时防御性剔除
+    const frameIds = new Set(restored.map((f) => f.id));
+    const restoredClips: AnimClip[] = (stored.clips ?? []).map((c) => ({
+      ...c,
+      entries: (c.entries ?? []).filter((e) => frameIds.has(e.frameId))
+    }));
+    clips.set(restoredClips);
+    activeClipId.set(
+      stored.activeClipId && restoredClips.some((c) => c.id === stored.activeClipId)
+        ? stored.activeClipId
+        : null
+    );
+
     if (stored.pack) {
       const parsed = parseAtlasJSON(stored.pack.json);
       const packedFrames: PackedFrame[] = parsed.frames.map((f, i) => ({
@@ -416,7 +620,9 @@ let saveTimer: ReturnType<typeof setTimeout> | undefined;
 function scheduleSave(): void {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    void saveProject(toStored(get(frames), get(settings), get(packResult), lastJSON)).catch(() => {});
+    void saveProject(
+      toStored(get(frames), get(settings), get(packResult), lastJSON, get(clips), get(activeClipId))
+    ).catch(() => {});
   }, 600);
 }
 
@@ -424,4 +630,6 @@ export function startAutoSave(): void {
   frames.subscribe(() => scheduleSave());
   settings.subscribe(() => scheduleSave());
   packResult.subscribe(() => scheduleSave());
+  clips.subscribe(() => scheduleSave());
+  activeClipId.subscribe(() => scheduleSave());
 }

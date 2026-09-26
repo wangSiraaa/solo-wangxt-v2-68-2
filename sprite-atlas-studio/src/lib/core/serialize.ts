@@ -1,10 +1,16 @@
 import type { PackLayout } from "./pack";
-import type { Settings } from "./types";
+import type { AnimClip, LoopMode, Settings } from "./types";
+import { isLoopMode } from "./clips";
 
 /**
  * 图集 JSON 格式：兼容 TexturePacker "Hash" 结构，
- * 并扩展 duration / frameOrder / settings / atlasDataURL，
- * 使重新导入后能完整恢复帧列表、顺序、时长与打包结果。
+ * 并扩展 duration / frameOrder / settings / clips / atlasDataURL，
+ * 使重新导入后能完整恢复帧列表、顺序、时长、动画片段与打包结果。
+ *
+ * 片段在 JSON 中通过帧名引用帧（帧 id 是运行时生成的，不具稳定性）：
+ * meta.clips = [{ name, loop: "loop"|"once"|"pingpong",
+ *                 frames: [{ frame: "walk_01.png", duration: 100, event?: "step" }] }]
+ * 旧格式（无 meta.clips）导入时由调用方自动创建一个默认片段。
  */
 
 export const JSON_APP_ID = "sprite-atlas-studio";
@@ -18,6 +24,21 @@ export interface AtlasJSONFrame {
   sourceSize: { w: number; h: number };
   /** 帧时长（毫秒） */
   duration: number;
+}
+
+export interface AtlasJSONClipEntry {
+  /** 引用的帧名（frames 对象的键） */
+  frame: string;
+  /** 该帧在片段内的时长（毫秒） */
+  duration: number;
+  /** 可选事件标记 */
+  event?: string;
+}
+
+export interface AtlasJSONClip {
+  name: string;
+  loop: LoopMode;
+  frames: AtlasJSONClipEntry[];
 }
 
 export interface AtlasJSON {
@@ -39,6 +60,8 @@ export interface AtlasJSON {
     };
     /** 一轮动画总时长（毫秒） */
     totalDuration: number;
+    /** 动画片段（旧格式没有此字段，导入时自动创建默认片段） */
+    clips?: AtlasJSONClip[];
     /** 内嵌图集（data:image/png;base64,...），存在时可独立恢复 */
     atlasDataURL?: string;
   };
@@ -48,7 +71,24 @@ export interface BuildJsonOptions {
   imageName: string;
   trimmed: boolean;
   settings: Settings;
+  /** 动画片段（按 frameId 引用帧，导出时转换为帧名） */
+  clips?: AnimClip[];
   atlasDataURL?: string;
+}
+
+/** 把运行时片段（frameId 引用）转换为 JSON 片段（帧名引用）；引用不在映射表中的条目被跳过 */
+export function clipsToJSON(clips: AnimClip[], nameById: Map<string, string>): AtlasJSONClip[] {
+  return clips.map((c) => ({
+    name: c.name,
+    loop: c.loop,
+    frames: c.entries.flatMap((e) => {
+      const frame = nameById.get(e.frameId);
+      if (!frame) return []; // 引用已不存在（不应发生，删除帧时会同步移除引用）
+      const entry: AtlasJSONClipEntry = { frame, duration: Math.max(1, e.duration) };
+      if (e.event) entry.event = e.event;
+      return [entry];
+    })
+  }));
 }
 
 /** 由打包结果生成 JSON 对象（纯函数） */
@@ -86,6 +126,10 @@ export function buildAtlasJSON(layout: PackLayout, opts: BuildJsonOptions): Atla
     },
     totalDuration: total
   };
+  if (opts.clips) {
+    const nameById = new Map(layout.frames.map((f) => [f.id, f.name]));
+    meta.clips = clipsToJSON(opts.clips, nameById);
+  }
   if (opts.atlasDataURL) meta.atlasDataURL = opts.atlasDataURL;
 
   return { frames, meta };
@@ -100,12 +144,27 @@ export interface ParsedFrameEntry {
   trimmed: boolean;
 }
 
+export interface ParsedClipEntry {
+  /** 引用的帧名 */
+  frame: string;
+  duration: number;
+  event?: string;
+}
+
+export interface ParsedClip {
+  name: string;
+  loop: LoopMode;
+  frames: ParsedClipEntry[];
+}
+
 export interface ParsedAtlasJSON {
   /** 按 frameOrder 排列的帧 */
   frames: ParsedFrameEntry[];
   size: { w: number; h: number };
   settings: Settings;
   imageName: string;
+  /** 动画片段；旧格式 JSON 没有此字段时为 undefined（调用方应创建默认片段） */
+  clips?: ParsedClip[];
   atlasDataURL?: string;
 }
 
@@ -187,6 +246,43 @@ export function parseAtlasJSON(raw: unknown): ParsedAtlasJSON {
 
   const imageName = typeof meta.image === "string" ? meta.image : "atlas.png";
   const atlasDataURL = typeof meta.atlasDataURL === "string" ? meta.atlasDataURL : undefined;
+  const clips = parseClips(meta.clips);
 
-  return { frames, size, settings, imageName, ...(atlasDataURL ? { atlasDataURL } : {}) };
+  return {
+    frames,
+    size,
+    settings,
+    imageName,
+    ...(clips ? { clips } : {}),
+    ...(atlasDataURL ? { atlasDataURL } : {})
+  };
+}
+
+/** 解析 meta.clips；字段缺失（旧格式）返回 undefined，结构非法抛错 */
+function parseClips(raw: unknown): ParsedClip[] | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (!Array.isArray(raw)) throw new Error("JSON 格式错误：meta.clips 应为数组");
+  return raw.map((c, i) => {
+    if (!isRecord(c)) throw new Error(`JSON 格式错误：片段 #${i + 1} 应为对象`);
+    const name = typeof c.name === "string" && c.name.trim() !== "" ? c.name : `片段 ${i + 1}`;
+    const loop: LoopMode = isLoopMode(c.loop) ? c.loop : "loop";
+    if (!Array.isArray(c.frames)) {
+      throw new Error(`JSON 格式错误：片段 "${name}" 缺少 frames 数组`);
+    }
+    const frames: ParsedClipEntry[] = c.frames.map((e, j) => {
+      if (!isRecord(e) || typeof e.frame !== "string") {
+        throw new Error(`JSON 格式错误：片段 "${name}" 第 ${j + 1} 项缺少 frame`);
+      }
+      const entry: ParsedClipEntry = {
+        frame: e.frame,
+        duration:
+          typeof e.duration === "number" && Number.isFinite(e.duration) && e.duration > 0
+            ? e.duration
+            : 100
+      };
+      if (typeof e.event === "string" && e.event.trim() !== "") entry.event = e.event;
+      return entry;
+    });
+    return { name, loop, frames };
+  });
 }

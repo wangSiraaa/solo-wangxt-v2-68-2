@@ -54,6 +54,27 @@ export interface PackResult {
   trimmed: boolean;
 }
 
+/** 片段循环模式：循环 / 单次 / 往返 */
+export type LoopMode = "loop" | "once" | "pingpong";
+
+/** 片段中的一个条目：引用某帧并携带独立的时长与可选事件标记 */
+export interface ClipEntry {
+  /** 引用的帧 id（FrameItem.id） */
+  frameId: string;
+  /** 该帧在片段内的时长（毫秒），与帧列表中的时长互不影响 */
+  duration: number;
+  /** 可选事件标记：播放到该帧时触发 */
+  event?: string;
+}
+
+/** 命名动画片段：引用已有帧，拥有独立顺序、单帧时长、循环模式与事件 */
+export interface AnimClip {
+  id: string;
+  name: string;
+  entries: ClipEntry[];
+  loop: LoopMode;
+}
+
 /** 打包/导出设置 */
 export interface Settings {
   /** 裁切透明边缘 */
